@@ -1,0 +1,15 @@
+{
+    "click_cps": 14,
+    "key_macro_trigger": "Key.f3",
+    "net_interface": "WiFi",
+    "macro_disconnect_mode": "Before Click Start",
+    "macro_hold_start": 0.0,
+    "macro_hold_len": 1.0,
+    "macro_net_start": 0.75,
+    "macro_net_len": 2.5,
+    "macro_spam_start": 1.0,
+    "macro_spam_len": 3.0,
+    "overlay_enabled": true,
+    "overlay_x": -165,
+    "overlay_y": 31
+}
