@@ -30,6 +30,8 @@ DEFAULT_CONFIG = {
     "click_cps": 10,
     "key_macro_trigger": "Key.f3",
     "net_interface": "Auto-Detect",
+    "network_method": "netsh",
+    "clumsy_hotkey": "[",
     "macro_disconnect_mode": "Before Click Start",
     "macro_hold_start": 0.0,
     "macro_hold_len": 2.0,
@@ -94,31 +96,108 @@ def save_config():
             json.dump(state["config"], f, indent=4)
     except: pass
 
+def send_clumsy_hotkey(key_char):
+    """Send a keyboard key press to trigger Clumsy"""
+    try:
+        # Use VkKeyScan to get the correct VK code for current keyboard layout
+        VkKeyScan = ctypes.windll.user32.VkKeyScanA
+        result = VkKeyScan(ord(key_char))
+        
+        if result == -1:
+            print(f"!! ERROR: Cannot map character '{key_char}' to virtual key")
+            return False
+        
+        vk = result & 0xFF
+        shift_state = (result >> 8) & 0xFF
+        
+        extra = ctypes.c_ulong(0)
+        
+        # Press shift if needed
+        if shift_state & 1:  # Shift required
+            ii_ = Input_I()
+            ii_.ki = KeyBdInput(0x10, 0, 0, 0, ctypes.pointer(extra))  # VK_SHIFT down
+            SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(1), ii_)), ctypes.sizeof(Input))
+            time.sleep(0.02)
+        
+        # Key down
+        ii_ = Input_I()
+        ii_.ki = KeyBdInput(vk, 0, 0, 0, ctypes.pointer(extra))
+        SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(1), ii_)), ctypes.sizeof(Input))
+        time.sleep(0.1)  # Länger halten für zuverlässige Erkennung
+        
+        # Key up
+        ii_.ki = KeyBdInput(vk, 0, 0x0002, 0, ctypes.pointer(extra))  # KEYEVENTF_KEYUP
+        SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(1), ii_)), ctypes.sizeof(Input))
+        
+        # Release shift if needed
+        if shift_state & 1:
+            time.sleep(0.02)
+            ii_.ki = KeyBdInput(0x10, 0, 0x0002, 0, ctypes.pointer(extra))  # VK_SHIFT up
+            SendInput(1, ctypes.pointer(Input(ctypes.c_ulong(1), ii_)), ctypes.sizeof(Input))
+        
+        time.sleep(0.05)  # Kurze Pause nach dem Senden
+        return True
+    except Exception as e:
+        print(f"!! ERROR sending Clumsy hotkey: {e}")
+        return False
+
 # --- NET LOGIC ---
 def disconnect_net():
-    if state["is_lagging"]: return
-    state["is_lagging"] = True
+    if state["is_lagging"]:
+        # print(">> WARNING: Already lagging, skipping disconnect")      
+        return
     
-    iface = state["config"]["net_interface"]
-    profile = get_current_wifi_profile()
-    if profile: state["wifi_profile"] = profile
+    method = state["config"].get("network_method", "netsh")
+
+    if method == "Clumsy":
+        hotkey  = state["config"].get("clumsy_hotkey", "[")
+        print(f">> ACTIVATING CLUMSY (Hotkey: {hotkey})")
+        success = send_clumsy_hotkey(hotkey)
+        if success:
+            state["is_lagging"] = True
+            print(">> CLUMSY: Toggle-Signal send (should now be active)")
+            return
+
+    else:
+        state["is_lagging"] = True
+        iface = state["config"]["net_interface"]
+        profile = get_current_wifi_profile()
+        if profile: state["wifi_profile"] = profile
     
-    print(f">> KILLING NETWORK: {iface}")
-    res = subprocess.run(f'netsh wlan disconnect interface="{iface}"', shell=True, capture_output=True, text=True)
-    if res.returncode != 0:
-        print(f"!! ERROR: {res.stderr.strip() or res.stdout.strip()}")
+        print(f">> KILLING NETWORK: {iface}")
+        res = subprocess.run(f'netsh wlan disconnect interface="{iface}"', shell=True, capture_output=True, text=True)
+        if res.returncode != 0:
+            print(f"!! ERROR: {res.stderr.strip() or res.stdout.strip()}")
+
     update_overlay()
 
 def reconnect_net():
-    if not state["is_lagging"]: return
-    state["is_lagging"] = False
+    if not state["is_lagging"]:
+        print(">> WARNING: Not lagging, skipping reconnect")
+        return
+
+    method = state["config"].get("network_method", "netsh")
     
-    iface = state["config"]["net_interface"]
-    prof = state["wifi_profile"]
+    if method == "Clumsy":
+        hotkey = state["config"].get("clumsy_hotkey", "[")
+        print(f">> DEACTIVATING CLUMSY (Hotkey: {hotkey})")
+        time.sleep(0.1)  # Kurze Pause vor dem Deaktivieren
+        success = send_clumsy_hotkey(hotkey)
+        if success:
+            state["is_lagging"] = False
+            print(">> CLUMSY: Toggle-Signal gesendet (sollte jetzt inaktiv sein)")
+        else:
+            print("!! ERROR: Clumsy Hotkey konnte nicht gesendet werden")
+            state["is_lagging"] = False  # Status trotzdem zurücksetzen
+    else:
+        state["is_lagging"] = False
+        iface = state["config"]["net_interface"]
+        prof = state["wifi_profile"]
+        
+        print(">> RESTORING NETWORK...")
+        cmd = f'netsh wlan connect interface="{iface}" name="{prof}"' if prof else f'netsh wlan connect interface="{iface}"'
+        subprocess.Popen(cmd, shell=True)
     
-    print(">> RESTORING NETWORK...")
-    cmd = f'netsh wlan connect interface="{iface}" name="{prof}"' if prof else f'netsh wlan connect interface="{iface}"'
-    subprocess.Popen(cmd, shell=True)
     update_overlay()
 
 # --- INPUT DRIVER ---
@@ -286,10 +365,20 @@ class App(tk.Tk):
             return e
 
         # Global Settings
+        tk.Label(self.frame, text="NETWORK METHOD:", bg=THEME["bg"], fg=THEME["fg"], font=THEME["font_mono"]).pack(anchor="w")
+        self.cb_net_method = ttk.Combobox(self.frame, values=["netsh", "Clumsy"], font=THEME["font_mono"])
+        self.cb_net_method.set(state["config"].get("network_method", "netsh"))
+        self.cb_net_method.pack(fill="x", pady=2)
+        # tk.Label(self.frame, text="NETWORK INTERFACE (netsh):", bg=THEME["bg"], fg=THEME["fg"], font=THEME["font_mono"]).pack(anchor="w", pady=(10,0))
         tk.Label(self.frame, text="NETWORK INTERFACE:", bg=THEME["bg"], fg=THEME["fg"], font=THEME["font_mono"]).pack(anchor="w")
         self.e_iface = tk.Entry(self.frame, bg="#222", fg="white", font=THEME["font_mono"])
         self.e_iface.insert(0, str(state["config"].get("net_interface", "WiFi")))
         self.e_iface.pack(fill="x", pady=2)
+
+        tk.Label(self.frame, text="CLUMSY HOTKEY:", bg=THEME["bg"], fg=THEME["fg"], font=THEME["font_mono"]).pack(anchor="w", pady=(10,0))
+        self.e_clumsy_key = tk.Entry(self.frame, bg="#222", fg="white", font=THEME["font_mono"])
+        self.e_clumsy_key.insert(0, str(state["config"].get("clumsy_hotkey", "[")))
+        self.e_clumsy_key.pack(fill="x", pady=2)
 
         tk.Label(self.frame, text="TRIGGER KEY:", bg=THEME["bg"], fg=THEME["fg"], font=THEME["font_mono"]).pack(anchor="w", pady=(10,0))
         self.cb_trig = ttk.Combobox(self.frame, values=keys, font=THEME["font_mono"]); self.cb_trig.set(state["config"]["key_macro_trigger"]); self.cb_trig.pack(fill="x", pady=2)
@@ -327,6 +416,8 @@ class App(tk.Tk):
         c["macro_disconnect_mode"] = self.cb_disc_mode.get()
         c["click_cps"] = self.s_cps.get()
         c["net_interface"] = self.e_iface.get()
+        c["network_method"] = self.cb_net_method.get()
+        c["clumsy_hotkey"] = self.e_clumsy_key.get()
         try:
             c["macro_hold_start"] = float(self.e_h_st.get())
             c["macro_hold_len"] = float(self.e_h_ln.get())
